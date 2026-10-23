@@ -518,6 +518,11 @@ impl Player {
         Ok(())
     }
 
+    /// Read the pause intent even when idle between tracks.
+    pub fn is_paused(&self) -> bool {
+        self.mpv.get_property("pause").unwrap_or(true)
+    }
+
     /// Stop playback and clear the current track.
     pub fn stop(&self) -> Result<(), PlayerError> {
         self.mpv.command("stop", &[])?;

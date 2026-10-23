@@ -45,11 +45,18 @@
 //! sharing the queue across threads — the forwarder forwards `TrackEnded` to
 //! the UI as today, and the UI loop responds by sending
 //! [`AppCommand::NextTrack`] back to the runtime. The runtime then advances the
-//! queue and plays the next track (or goes idle), emitting `NowPlaying`. This
-//! keeps the queue single-owned; the extra hop is one UI tick (<~60 ms) and is
+//! queue and plays the next track, extending it with radio when repeat is off.
+//! `NowPlaying` announces playback; `PlaybackStopped` clears the UI when waiting
+//! for radio or when no new tracks are available. This keeps the queue
+//! single-owned; the extra hop is one UI tick (<~60 ms) and is
 //! invisible. Crucially, `TrackError` is forwarded but the UI does **not** send
 //! `NextTrack` for it — a broken resolver must never machine-gun the queue (the
 //! end-file battle lesson, asserted in the UI-layer tests in `main.rs`).
+//!
+//! Radio prefetch runs in a cancellable task while the final track plays. Its
+//! tagged result returns to this same runtime loop; only that loop can append
+//! tracks or start playback. Queue replacement invalidates old results, repeat
+//! modes suppress radio, and pause intent is respected while waiting for HTTP.
 //!
 //! ## Why these channel types
 //!
@@ -77,6 +84,7 @@
 
 use std::sync::mpsc::Sender as StdSender;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use tokio::runtime::Builder;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -89,6 +97,9 @@ use crate::views::queue_view::QueueSnapshot;
 use crate::mpris::{self, MprisHandle, MprisState, control_to_command};
 use crate::player::{Player, PlayerEvent};
 use crate::queue::{QueueManager, RepeatMode};
+
+mod autoplay;
+use autoplay::{Advance, Autoplay, Failure as RadioFailure, Request as RadioRequest};
 
 /// A command sent from the UI thread to the runtime thread.
 ///
@@ -133,7 +144,8 @@ pub enum AppCommand {
         start_index: usize,
     },
     /// Advance to the next queued track (auto-advance on EOF, or the `n` key).
-    /// Plays the new current track, or goes idle when the queue is exhausted.
+    /// Plays the next track, fetching radio when the queue runs out and repeat
+    /// is off. Goes idle if radio cannot supply any new tracks.
     NextTrack,
     /// Go back one track (the `p` key). At the start of the queue this stays
     /// on the first track and replays it (mirrors Python `action_previous_track`).
@@ -348,6 +360,9 @@ pub enum AppEvent {
     /// `start-file` and `file-loaded` (see [`translate_player_event`]); M6's
     /// MPRIS may need to split them for metadata publishing.
     PlayerStarted,
+    /// Playback stopped while waiting for radio, or after radio was exhausted.
+    /// Clears the UI without requesting another queue advance.
+    PlaybackStopped,
     /// The current track ended naturally; the queue should advance. The UI
     /// reacts by sending [`AppCommand::NextTrack`] back to the runtime (the
     /// queue lives runtime-side; see the module docs on the advance flow).
@@ -554,6 +569,7 @@ fn run_runtime(
     let mut queue = QueueManager::new();
 
     runtime.block_on(async move {
+        let mut radio = RadioRuntime::new();
         // Spawn the MPRIS server on THIS runtime (the single-executor rule from
         // the spike). The inbound-control channel relays D-Bus method calls
         // (PlayPause/Next/Previous/Stop) back here; the select loop below maps
@@ -561,24 +577,36 @@ fn run_runtime(
         // bus, name taken) — already toasted once, the app runs without it.
         let (control_tx, mut control_rx) = mpsc::unbounded_channel::<mpris::MprisControl>();
         let mpris = mpris::spawn_mpris(control_tx, events.clone()).await;
+        let mut controls_open = true;
         // Publish the initial (idle) state so probes have something to read.
         push_mpris_state(mpris.as_ref(), &queue, &player);
 
         loop {
-            // Concurrently await a UI command or an inbound MPRIS control. The
-            // control is mapped to the same AppCommand the keymap would produce,
-            // so both paths converge on one match.
+            // Ready controls take priority over completed radio fetches: a
+            // queued pause or queue replacement must apply before a late batch
+            // can resume playback. Disable closed MPRIS input so it cannot
+            // starve radio results when no desktop bus is available.
             let command = tokio::select! {
+                biased;
                 cmd = commands.recv() => match cmd {
                     Some(cmd) => cmd,
                     // The UI command sender is gone — the app is exiting.
                     None => break,
                 },
-                control = control_rx.recv() => match control {
+                control = control_rx.recv(), if controls_open => match control {
                     Some(control) => control_to_command(control),
-                    // The control channel only closes when the MPRIS interface
-                    // (and its server) is dropped; keep serving UI commands.
-                    None => continue,
+                    None => {
+                        controls_open = false;
+                        continue;
+                    },
+                },
+                result = radio.results.recv() => {
+                    if let Some((request, result)) = result {
+                        radio.state.complete(&request, result, &queue);
+                        radio.maintain(&mut queue, &mut player, client.as_ref(), events);
+                        push_mpris_state(mpris.as_ref(), &queue, &player);
+                    }
+                    continue;
                 },
             };
             match command {
@@ -615,16 +643,23 @@ fn run_runtime(
                 AppCommand::FetchQueue => emit_queue_snapshot(&queue, events),
                 AppCommand::CheckSession => handle_check_session(client.as_ref(), events).await,
                 AppCommand::Play(track) => {
+                    radio.state.reset();
                     play_single(&mut queue, &mut player, track, events);
                 }
                 AppCommand::PlayPlaylist {
                     tracks,
                     start_index,
                 } => {
+                    radio.state.reset();
                     play_playlist(&mut queue, &mut player, tracks, start_index, events);
                 }
-                AppCommand::NextTrack => advance_queue(&mut queue, &mut player, events),
-                AppCommand::PreviousTrack => rewind_queue(&mut queue, &mut player, events),
+                AppCommand::NextTrack => {
+                    advance_queue(&mut queue, &mut player, events, &mut radio.state);
+                }
+                AppCommand::PreviousTrack => {
+                    radio.state.cancel_wait();
+                    rewind_queue(&mut queue, &mut player, events);
+                }
                 AppCommand::ToggleShuffle => {
                     queue.toggle_shuffle();
                     emit_now_playing(&queue, events);
@@ -664,8 +699,17 @@ fn run_runtime(
                     let _ = events.send(AppEvent::ActionResult(format!("Added to queue: {title}")));
                 }
                 AppCommand::StartRadio(video_id) => {
-                    handle_start_radio(client.as_ref(), &video_id, &mut queue, &mut player, events)
-                        .await;
+                    if handle_start_radio(
+                        client.as_ref(),
+                        &video_id,
+                        &mut queue,
+                        &mut player,
+                        events,
+                    )
+                    .await
+                    {
+                        radio.state.reset();
+                    }
                 }
                 AppCommand::SearchAndOpenArtist(name) => {
                     handle_search_and_open_artist(client.as_ref(), &name, events).await;
@@ -709,6 +753,7 @@ fn run_runtime(
                     handle_unfollow_artist(client.as_ref(), &name, events).await;
                 }
             }
+            radio.maintain(&mut queue, &mut player, client.as_ref(), events);
             // After every command, push a fresh MPRIS snapshot built from the
             // queue + the live player state. The MPRIS task diffs it against the
             // last and emits ONLY changed properties, so pushing unconditionally
@@ -724,6 +769,110 @@ fn run_runtime(
             handle.shutdown();
         }
     });
+}
+
+type RadioResult = (RadioRequest, Result<Vec<Track>, RadioFailure>);
+
+/// Only radio fetching is concurrent: queue and player mutations remain in the
+/// runtime loop. Cancelling a task is an optimization; tagged results are also
+/// checked by Autoplay in case a completion was already queued before abort.
+struct RadioRuntime {
+    state: Autoplay,
+    task: Option<(RadioRequest, tokio::task::JoinHandle<()>)>,
+    sender: UnboundedSender<RadioResult>,
+    results: UnboundedReceiver<RadioResult>,
+}
+
+impl RadioRuntime {
+    fn new() -> Self {
+        let (sender, results) = mpsc::unbounded_channel();
+        Self {
+            state: Autoplay::default(),
+            task: None,
+            sender,
+            results,
+        }
+    }
+
+    fn maintain(
+        &mut self,
+        queue: &mut QueueManager,
+        player: &mut Player,
+        client: Option<&InnerTubeClient>,
+        events: &StdSender<AppEvent>,
+    ) {
+        self.state.refresh(queue, player.is_paused());
+        if let Some(advance) = self.state.ready(queue) {
+            apply_advance(advance, queue, player, events);
+            self.state.refresh(queue, player.is_paused());
+        }
+        if self
+            .task
+            .as_ref()
+            .is_some_and(|(request, _)| self.state.pending() != Some(request))
+            && let Some((_, task)) = self.task.take()
+        {
+            task.abort();
+        }
+        if let Some(request) = self.state.request(queue) {
+            if let Some(client) = client {
+                let client = client.clone();
+                let sender = self.sender.clone();
+                let task_request = request.clone();
+                let task = tokio::spawn(async move {
+                    if task_request.attempt > 1 {
+                        tokio::time::sleep(Duration::from_secs(1 << (task_request.attempt - 2)))
+                            .await;
+                    }
+                    let result = fetch_radio_batch(&client, &task_request.seed).await;
+                    let _ = sender.send((task_request, result));
+                });
+                self.task = Some((request, task));
+            } else {
+                self.state.complete(
+                    &request,
+                    Err(RadioFailure {
+                        message: "Not signed in — run: ytmusic-tui auth".into(),
+                        retryable: false,
+                    }),
+                    queue,
+                );
+            }
+        }
+        if let Some(notice) = self.state.take_notice() {
+            let _ = events.send(AppEvent::ActionResult(notice));
+        }
+    }
+}
+
+impl Drop for RadioRuntime {
+    fn drop(&mut self) {
+        if let Some((_, task)) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+async fn fetch_radio_batch(
+    client: &InnerTubeClient,
+    seed: &str,
+) -> Result<Vec<Track>, RadioFailure> {
+    match tokio::time::timeout(Duration::from_secs(20), client.get_radio(seed, RADIO_LIMIT)).await {
+        Ok(Ok(tracks)) => Ok(tracks),
+        Ok(Err(error)) => {
+            let retryable = matches!(error, ytmusic_api::ApiError::Transport(_))
+                || matches!(error, ytmusic_api::ApiError::Http { status, .. }
+                    if status == 408 || status == 429 || status >= 500);
+            Err(RadioFailure {
+                message: ytmusic_api::classify_api_error(&error),
+                retryable,
+            })
+        }
+        Err(_) => Err(RadioFailure {
+            message: "Radio request timed out".into(),
+            retryable: true,
+        }),
+    }
 }
 
 /// Build an [`MprisState`] from the queue + live player state and push it to the
@@ -868,10 +1017,9 @@ fn play_playlist(
     play_current(queue, player, events);
 }
 
-/// Advance to the next track and play it, or go idle when the queue is
-/// exhausted. The auto-advance target (also the `n` key). Mirrors Python
-/// `action_next_track` / `_on_track_end`: only plays when `next_track` returns
-/// a track.
+/// Advance to the next track, extending an exhausted queue with radio when
+/// repeat is off. Natural EOF and the `n` key share this path. Pending HTTP
+/// leaves playback stopped until the runtime receives a usable batch.
 ///
 /// Note on `RepeatMode::One`: `next_track` returns the *current* track again
 /// (the queue keeps its index), so this re-issues `play_current` for the same
@@ -880,15 +1028,30 @@ fn play_playlist(
 /// `loadfile replace` replays the track. Because EOF only fires at the *end* of
 /// a track, this is one reload per playthrough — not a tight loop — and matches
 /// the Python client exactly.
-fn advance_queue(queue: &mut QueueManager, player: &mut Player, events: &StdSender<AppEvent>) {
-    if queue.next_track().is_some() {
-        play_current(queue, player, events);
-    } else {
-        // Queue exhausted (repeat Off at the end): the UI's TrackEnded fold
-        // already returned the bar to idle; emit an idle NowPlaying so the
-        // metadata (title/artist/album) clears too.
-        emit_now_playing(queue, events);
+fn advance_queue(
+    queue: &mut QueueManager,
+    player: &mut Player,
+    events: &StdSender<AppEvent>,
+    autoplay: &mut Autoplay,
+) {
+    apply_advance(autoplay.advance(queue), queue, player, events);
+}
+
+fn apply_advance(
+    advance: Advance,
+    queue: &QueueManager,
+    player: &mut Player,
+    events: &StdSender<AppEvent>,
+) {
+    match advance {
+        Advance::Play => play_current(queue, player, events),
+        Advance::Wait | Advance::Idle => {
+            // Explicit Next must stop the old track even when HTTP is pending.
+            report_player_result(player.stop(), events);
+            let _ = events.send(AppEvent::PlaybackStopped);
+        }
     }
+    emit_queue_snapshot(queue, events);
 }
 
 /// Go back one track and play it (the `p` key). Mirrors Python
@@ -1190,25 +1353,28 @@ async fn handle_start_radio(
     queue: &mut QueueManager,
     player: &mut Player,
     events: &StdSender<AppEvent>,
-) {
+) -> bool {
     let Some(client) = client else {
         let _ = events.send(AppEvent::ApiError(
             "Not signed in — run: ytmusic-tui auth".to_owned(),
         ));
-        return;
+        return false;
     };
     match client.get_radio(video_id, RADIO_LIMIT).await {
         Ok(tracks) if tracks.is_empty() => {
             let _ = events.send(AppEvent::ActionResult(
                 "Radio returned no tracks".to_owned(),
             ));
+            false
         }
         Ok(tracks) => {
             play_playlist(queue, player, tracks, 0, events);
             let _ = events.send(AppEvent::ActionResult("Started radio".to_owned()));
+            true
         }
         Err(err) => {
             let _ = events.send(AppEvent::ApiError(ytmusic_api::classify_api_error(&err)));
+            false
         }
     }
 }

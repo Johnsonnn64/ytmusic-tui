@@ -99,6 +99,11 @@ impl QueueManager {
         self.repeat_mode
     }
 
+    /// Whether the selected track is the final entry in the queue.
+    pub fn is_last_track(&self) -> bool {
+        self.current_index >= 0 && self.current_index as usize + 1 == self.tracks.len()
+    }
+
     /// Set the repeat mode directly.
     pub fn set_repeat_mode(&mut self, mode: RepeatMode) {
         self.repeat_mode = mode;
@@ -113,15 +118,7 @@ impl QueueManager {
     /// If the queue was empty, exhausted, or the index is past the end, the
     /// index is reset so that [`current_track`] returns a valid track.
     pub fn add(&mut self, track: Track) {
-        let was_empty_or_exhausted = self.current_index < 0
-            || self.current_index >= self.tracks.len() as i64
-            || self.exhausted;
-        let insert_pos = self.tracks.len() as i64;
-        self.tracks.push(track);
-        if was_empty_or_exhausted {
-            self.current_index = insert_pos;
-            self.exhausted = false;
-        }
+        self.add_many(vec![track]);
     }
 
     /// Append multiple tracks to the end of the queue.
@@ -136,6 +133,9 @@ impl QueueManager {
             || self.current_index >= self.tracks.len() as i64
             || self.exhausted;
         let insert_pos = self.tracks.len() as i64;
+        if let Some(original) = self.original_tracks.as_mut() {
+            original.extend(tracks.iter().cloned());
+        }
         self.tracks.extend(tracks);
         if was_empty_or_exhausted {
             self.current_index = insert_pos;
@@ -224,7 +224,12 @@ impl QueueManager {
             return Err(IndexOutOfRange(index));
         }
 
-        self.tracks.remove(index);
+        let removed = self.tracks.remove(index);
+        if let Some(original) = self.original_tracks.as_mut()
+            && let Some(position) = original.iter().position(|track| track == &removed)
+        {
+            original.remove(position);
+        }
 
         if self.tracks.is_empty() {
             self.current_index = -1;
@@ -1116,5 +1121,32 @@ mod tests {
             q.add(make_track(99));
             assert_eq!(q.current_track(), Some(&new_tracks[0]));
         }
+    }
+
+    #[test]
+    fn shuffled_queue_preserves_additions_and_removals_when_restored() {
+        let mut queue = QueueManager::new();
+        queue.set_playlist(make_tracks(3), 0);
+        queue.toggle_shuffle();
+        queue.add(make_track(4));
+        queue.add_many(vec![make_track(5), make_track(6)]);
+        let removed_index = queue
+            .tracks()
+            .iter()
+            .position(|track| track == &make_track(4))
+            .unwrap();
+        queue.remove(removed_index).unwrap();
+        queue.toggle_shuffle();
+        assert_eq!(
+            queue.tracks(),
+            vec![
+                make_track(1),
+                make_track(2),
+                make_track(3),
+                make_track(5),
+                make_track(6)
+            ]
+        );
+        assert_eq!(queue.current_track(), Some(&make_track(1)));
     }
 }

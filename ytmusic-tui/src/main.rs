@@ -860,11 +860,15 @@ impl AppModel {
                 self.push_toast(message, Severity::Info);
             }
             AppEvent::PlayerStarted => self.player.on_started(),
+            AppEvent::PlaybackStopped => {
+                self.current_video_id = None;
+                self.player.on_track_ended();
+            }
             AppEvent::TrackEnded => {
                 // Natural EOF: clear the bar to idle now, and ask the runtime to
                 // advance the queue. The runtime replies with NowPlaying +
-                // PlayerStarted for the next track (or an idle NowPlaying at the
-                // end of the queue) on the following ticks.
+                // PlayerStarted for the next track, or PlaybackStopped while
+                // waiting for radio / when recommendations are exhausted.
                 self.current_video_id = None;
                 self.player.on_track_ended();
                 return Some(AppCommand::NextTrack);
@@ -4019,6 +4023,25 @@ mod tests {
         assert!(!model.player.has_track);
         assert!(!model.player.is_playing);
         assert_eq!(follow_up, Some(AppCommand::NextTrack));
+    }
+
+    #[test]
+    fn waiting_for_radio_clears_playback_without_another_advance() {
+        let mut model = AppModel::new(Theme::default());
+        model.current_video_id = Some("last-track".into());
+        fold(&mut model, AppEvent::PlayerStarted);
+        fold(&mut model, AppEvent::PlayerProgress(42.0));
+        let follow_up = model.on_event(AppEvent::PlaybackStopped);
+        assert_eq!(follow_up, None);
+        assert!(model.current_video_id.is_none());
+        assert!(!model.player.has_track);
+        assert!(!model.player.is_playing);
+        assert_eq!(model.player.position, 0.0);
+        fold(&mut model, AppEvent::PlayerStarted);
+        assert!(
+            model.player.is_playing,
+            "a later radio batch can start normally"
+        );
     }
 
     #[test]

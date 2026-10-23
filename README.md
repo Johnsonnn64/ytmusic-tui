@@ -32,7 +32,11 @@ designed for tiling WM setups.
 - **3-pane library** — Playlists, Albums, and Artists tabs (Tab to cycle)
 - **Album and Artist views** — dedicated detail pages
 - **Queue management** with shuffle and repeat
-- **Radio** — start a YouTube Music radio from any track (`R`)
+- **Radio** — start a YouTube Music radio from any track (`R`); playback also
+  continues automatically with radio when a song, album, or playlist ends.
+  Repeat one/all take precedence. Recommendations load in the background during
+  the final track, with manually queued tracks taking priority. If radio cannot
+  supply new tracks after bounded retries, playback stops with a notification.
 - **Likes** — like/unlike tracks without leaving the terminal (`f`)
 - **Recently played** — your listening history as a page (`H`)
 - **Lyrics page** (`L` key)
