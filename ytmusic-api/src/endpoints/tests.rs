@@ -180,6 +180,10 @@ fn search_default_returns_expected_tracks() {
     assert_eq!(t0.artist, "LO-FI BEATS, Lofi Chillhop");
     assert_eq!(t0.album, "");
     assert_eq!(t0.duration_seconds, 0.0);
+    assert_eq!(
+        t0.thumbnail_url,
+        "https://yt3.googleusercontent.com/lo3kBR_9sjWn8Mu1ABvfXbsiiYxC1nImd49gfyqJiQJ5Ew-DXJa1nzIVXXBkA6L6gHWydIuyudxptSkV=w544-h544-l90-rj"
+    );
 
     let t1 = &results.tracks[1];
     assert_eq!(t1.video_id, "tnlBctBzH1g");
@@ -209,6 +213,10 @@ fn search_songs_filter_returns_expected_tracks() {
     let results = block_on(search_all(&client, "lofi", 20, Some("songs"))).expect("search ok");
 
     assert_eq!(results.tracks.len(), 3);
+    assert_eq!(
+        results.tracks[0].thumbnail_url,
+        "https://yt3.googleusercontent.com/HjOWkzpJB1OhOmnGMOCh5q-VCOpM64ayl6n88873xZyX3i4i6I973X8FOSyCGgoo0pOz-6oJYmsb6pMa=w120-h120-l90-rj"
+    );
     let expected = [
         (
             "BVDkTrlWPT0",
@@ -243,6 +251,23 @@ fn search_songs_filter_returns_expected_tracks() {
     // The songs filter sends the songs params blob.
     let (_, body) = client.last();
     assert_eq!(body["params"], "EgWKAQIIAWoMEA4QChADEAQQCRAF");
+}
+
+#[test]
+fn search_preserves_tracks_without_artwork() {
+    let mut response = fixture("search_songs.json");
+    let first = &mut response["contents"]["tabbedSearchResultsRenderer"]["tabs"][0]["tabRenderer"]
+        ["content"]["sectionListRenderer"]["contents"][0]["musicShelfRenderer"]["contents"][0]["musicResponsiveListItemRenderer"];
+    first.as_object_mut().unwrap().remove("thumbnail");
+
+    for filter in [None, Some("songs")] {
+        let client = FakePost::new(response.clone());
+        let results = block_on(search_all(&client, "lofi", 20, filter)).expect("search ok");
+        assert_eq!(results.tracks.len(), 3);
+        assert_eq!(results.tracks[0].video_id, "BVDkTrlWPT0");
+        assert!(results.tracks[0].thumbnail_url.is_empty());
+        assert!(!results.tracks[1].thumbnail_url.is_empty());
+    }
 }
 
 #[test]

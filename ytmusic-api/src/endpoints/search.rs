@@ -158,8 +158,8 @@ fn derive_result_type(data: &Value, video_type: Option<&str>) -> Option<String> 
     }
 }
 
-/// Song / video branch: title, videoId, and the song-run fields (artists,
-/// album, duration). `album` is forced to `null` first (ytmusicapi sets
+/// Song / video branch: title, videoId, thumbnails, and the song-run fields
+/// (artists, album, duration). `album` is forced to `null` first (ytmusicapi sets
 /// `search_result["album"] = None` for songs before the run merge).
 fn parse_song_result(data: &Value, out: &mut Map<String, Value>) {
     if let Some(title) = item_text(data, 0, 0) {
@@ -177,6 +177,7 @@ fn parse_song_result(data: &Value, out: &mut Map<String, Value>) {
     );
 
     merge_song_runs(data, out);
+    insert_thumbnails(data, out);
 }
 
 /// Build the combined runs (flex column 1, plus flex column 2 with a dummy
