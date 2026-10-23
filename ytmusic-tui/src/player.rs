@@ -439,6 +439,12 @@ impl Player {
             init.set_property("video", "no")?;
             init.set_property("terminal", "no")?;
             init.set_property("ytdl-format", format)?;
+            // The visionOS client avoids slow/failing TV stream URLs while
+            // retaining the audio formats. Still validate before opening them.
+            init.set_property(
+                "ytdl-raw-options",
+                "check-formats=,extractor-args=youtube:player_client=visionos",
+            )?;
             Ok(())
         })
         .map_err(|e| PlayerError::Init(error_detail(&e)))?;
