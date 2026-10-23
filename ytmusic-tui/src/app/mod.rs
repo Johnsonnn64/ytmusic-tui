@@ -299,6 +299,8 @@ pub struct NowPlaying {
     pub artist: String,
     /// The current track's album (the bar's dimmed second row).
     pub album: String,
+    /// The current track's cover URL, empty when unavailable or idle.
+    pub thumbnail_url: String,
     /// The current track's `video_id` (empty when idle).
     pub video_id: String,
     /// The track's duration from the API, used as the bar's fallback while mpv
@@ -934,6 +936,7 @@ fn now_playing_snapshot(queue: &QueueManager) -> NowPlaying {
             title: track.title.clone(),
             artist: track.artist.clone(),
             album: track.album.clone(),
+            thumbnail_url: track.thumbnail_url.clone(),
             video_id: track.video_id.clone(),
             duration_seconds: track.duration_seconds,
             shuffle: queue.shuffle(),
@@ -943,6 +946,7 @@ fn now_playing_snapshot(queue: &QueueManager) -> NowPlaying {
             title: String::new(),
             artist: String::new(),
             album: String::new(),
+            thumbnail_url: String::new(),
             video_id: String::new(),
             duration_seconds: 0.0,
             shuffle: queue.shuffle(),
@@ -1757,6 +1761,7 @@ mod tests {
         assert_eq!(snap.title, "");
         assert_eq!(snap.artist, "");
         assert_eq!(snap.album, "");
+        assert_eq!(snap.thumbnail_url, "");
         assert_eq!(snap.video_id, "");
         assert_eq!(snap.duration_seconds, 0.0);
         assert!(!snap.shuffle);
@@ -1766,11 +1771,14 @@ mod tests {
     #[test]
     fn now_playing_snapshot_carries_current_track_metadata() {
         let mut queue = QueueManager::new();
-        queue.set_playlist(vec![track("v1", "Song", "Band", "LP", 200.0)], 0);
+        let mut song = track("v1", "Song", "Band", "LP", 200.0);
+        song.thumbnail_url = "https://example.test/cover.jpg".into();
+        queue.set_playlist(vec![song], 0);
         let snap = now_playing_snapshot(&queue);
         assert_eq!(snap.title, "Song");
         assert_eq!(snap.artist, "Band");
         assert_eq!(snap.album, "LP");
+        assert_eq!(snap.thumbnail_url, "https://example.test/cover.jpg");
         assert_eq!(snap.video_id, "v1");
         assert_eq!(snap.duration_seconds, 200.0);
     }

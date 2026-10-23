@@ -55,7 +55,7 @@ impl ArtworkManager {
         if enabled && std::env::var_os("DISPLAY").is_some_and(|value| !value.is_empty()) {
             let (scene_tx, scene_rx) = watch::channel(Scene::default());
             match std::thread::Builder::new()
-                .name("queue-artwork".into())
+                .name("artwork".into())
                 .spawn(move || {
                     if let Err(error) = x11::run(scene_rx, &status_tx) {
                         let _ = status_tx.send(Status::Failed(error));

@@ -24,6 +24,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::Theme;
+use crate::artwork::Placement;
 use crate::formatting::format_duration;
 
 /// Repeat mode for the bar's mode indicator.
@@ -90,6 +91,8 @@ pub struct PlayerBarState {
     pub artist: String,
     /// Current track album (dimmed second row).
     pub album: String,
+    /// Current track cover, empty when absent or playback stops.
+    pub thumbnail_url: String,
     /// Whether a track is loaded — `true` between `PlayerStarted` and
     /// `TrackEnded`. Mirrors Python keying the duration display on
     /// `state.video_id` being set: while a track is active a resolving duration
@@ -114,6 +117,7 @@ impl Default for PlayerBarState {
             title: String::new(),
             artist: String::new(),
             album: String::new(),
+            thumbnail_url: String::new(),
             has_track: false,
             shuffle: false,
             repeat: RepeatMode::Off,
@@ -252,6 +256,7 @@ impl PlayerBarState {
         self.title.clear();
         self.artist.clear();
         self.album.clear();
+        self.thumbnail_url.clear();
     }
 }
 
@@ -363,7 +368,9 @@ fn progress_bar_text(progress: f64, available_width: u16) -> String {
 /// The bottom now-playing bar. Stateless: it renders a borrowed
 /// [`PlayerBarState`].
 #[derive(Debug, Clone, Copy, Default)]
-pub struct PlayerBar;
+pub struct PlayerBar {
+    pub artwork_enabled: bool,
+}
 
 /// Fixed bar height in terminal rows: a top-border divider plus the three
 /// content rows (Python's `PlayerBar { height: 4; border-top: solid }`).
@@ -373,8 +380,28 @@ pub const PLAYER_BAR_HEIGHT: u16 = 4;
 /// the bar area to size the progress glyphs (Python subtracted 18 from the
 /// terminal width).
 const TIME_COLUMN_WIDTH: u16 = 18;
+const ART_WIDTH: u16 = 6;
+const ART_HEIGHT: u16 = 3;
+const ART_MIN_WIDTH: u16 = 70;
 
 impl PlayerBar {
+    /// Share the exact cover slot between terminal text and the image worker.
+    pub fn artwork_placement(self, area: Rect, state: &PlayerBarState) -> Option<Placement> {
+        let inner = Block::default().borders(Borders::TOP).inner(area);
+        if !self.artwork_enabled
+            || state.thumbnail_url.is_empty()
+            || inner.width < ART_MIN_WIDTH
+            || inner.height < ART_HEIGHT
+        {
+            return None;
+        }
+        Some(Placement {
+            identifier: "now-playing".into(),
+            url: state.thumbnail_url.clone(),
+            area: Rect::new(inner.x + 1, inner.y, ART_WIDTH, ART_HEIGHT),
+        })
+    }
+
     /// Render the bar into `area`: a top-border divider (Python's
     /// `border-top: solid $primary-background`) over a surface-filled
     /// three-row body (track info, album, progress).
@@ -385,8 +412,14 @@ impl PlayerBar {
             .borders(Borders::TOP)
             .border_style(Style::default().fg(theme.primary_background))
             .style(Style::default().bg(theme.surface));
-        let inner = block.inner(area);
+        let mut inner = block.inner(area);
         frame.render_widget(block, area);
+
+        if let Some(image) = self.artwork_placement(area, state) {
+            let text_x = image.area.right() + 2;
+            inner.width = inner.right().saturating_sub(text_x);
+            inner.x = text_x;
+        }
 
         let rows = Layout::vertical([
             Constraint::Length(1), // track info + modes + volume
@@ -835,12 +868,76 @@ mod tests {
 
     // -- rendering (TestBackend) -------------------------------------------
 
+    #[test]
+    fn cover_slot_stays_clear_of_all_three_text_rows() {
+        let state = PlayerBarState {
+            has_track: true,
+            title: "Song".into(),
+            artist: "Band".into(),
+            album: "Album".into(),
+            thumbnail_url: "https://example.test/cover.jpg".into(),
+            ..Default::default()
+        };
+        let bar = PlayerBar {
+            artwork_enabled: true,
+        };
+        let area = Rect::new(0, 0, 80, PLAYER_BAR_HEIGHT);
+        let image = bar.artwork_placement(area, &state).unwrap();
+        assert_eq!(image.area, Rect::new(1, 1, 6, 3));
+        let mut terminal = Terminal::new(TestBackend::new(80, PLAYER_BAR_HEIGHT)).unwrap();
+        terminal
+            .draw(|frame| bar.render(frame, area, &state, &Theme::default()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for y in image.area.y..image.area.bottom() {
+            for x in 0..image.area.right() + 2 {
+                assert_eq!(buffer[(x, y)].symbol(), " ");
+            }
+        }
+        assert_eq!(buffer[(9, 1)].symbol(), ICON_PAUSED);
+        assert_eq!(buffer[(13, 2)].symbol(), "A");
+        assert_eq!(buffer[(9, 3)].symbol(), "╶");
+    }
+
+    #[test]
+    fn cover_falls_back_when_disabled_missing_or_too_small() {
+        let mut state = PlayerBarState {
+            thumbnail_url: "https://example.test/cover.jpg".into(),
+            ..Default::default()
+        };
+        let bar = PlayerBar {
+            artwork_enabled: true,
+        };
+        assert!(
+            bar.artwork_placement(Rect::new(4, 20, 80, 4), &state)
+                .is_some()
+        );
+        assert!(
+            PlayerBar::default()
+                .artwork_placement(Rect::new(0, 0, 80, 4), &state)
+                .is_none()
+        );
+        for area in [
+            Rect::new(0, 0, 69, 4),
+            Rect::new(0, 0, 80, 3),
+            Rect::default(),
+        ] {
+            assert!(bar.artwork_placement(area, &state).is_none());
+        }
+        state.on_track_ended();
+        assert!(state.thumbnail_url.is_empty());
+        assert!(
+            bar.artwork_placement(Rect::new(0, 0, 80, 4), &state)
+                .is_none()
+        );
+    }
+
     fn render_bar(state: &PlayerBarState, w: u16) -> String {
         let backend = TestBackend::new(w, PLAYER_BAR_HEIGHT);
         let mut terminal = Terminal::new(backend).unwrap();
         let theme = Theme::default();
         terminal
-            .draw(|frame| PlayerBar.render(frame, frame.area(), state, &theme))
+            .draw(|frame| PlayerBar::default().render(frame, frame.area(), state, &theme))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let width = buffer.area().width as usize;

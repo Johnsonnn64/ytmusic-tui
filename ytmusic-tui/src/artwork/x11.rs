@@ -345,7 +345,7 @@ impl Layer {
                 Err(_) => return Err("Could not launch ueberzugpp".into()),
             }
         }
-        let child = child.ok_or("Install ueberzugpp to show Queue artwork")?;
+        let child = child.ok_or("Install ueberzugpp to show artwork")?;
         let socket = directory
             .path()
             .join(format!("ueberzugpp-{}.socket", child.id()));

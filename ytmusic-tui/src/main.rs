@@ -393,14 +393,17 @@ fn run_loop(
     // Surface dropped keymap bindings once, on the status line.
     model.set_keymap_warnings(&keymap_warnings);
 
-    let mut artwork = ArtworkManager::new(config.ui.queue_artwork);
+    let mut artwork = ArtworkManager::new(config.ui.queue_artwork || config.ui.player_artwork);
     let mut artwork_revision = 0_u64;
 
     while !model.should_quit {
         if let Some(message) = artwork.poll() {
-            model.push_toast(format!("Queue artwork: {message}"), Severity::Info);
+            model.push_toast(format!("Artwork: {message}"), Severity::Info);
         }
-        model.queue_view.set_artwork_enabled(artwork.is_available());
+        model
+            .queue_view
+            .set_artwork_enabled(config.ui.queue_artwork && artwork.is_available());
+        model.player_artwork_enabled = config.ui.player_artwork && artwork.is_available();
         // Drain events that arrived since the last tick before drawing, so the
         // frame reflects the latest player position / loaded data.
         drain_events(events, &mut model, runtime);
@@ -640,6 +643,7 @@ struct AppModel {
     history: HistoryView,
     queue_view: QueueView,
     player: PlayerBarState,
+    player_artwork_enabled: bool,
     /// The `video_id` of the currently playing track, updated from
     /// [`AppEvent::NowPlaying`]. Stored here rather than in [`PlayerBarState`]
     /// because the bar view has no need for it; it is only used to fetch lyrics.
@@ -741,6 +745,7 @@ impl AppModel {
             history: HistoryView::new(),
             queue_view: QueueView::new(),
             player: PlayerBarState::default(),
+            player_artwork_enabled: false,
             current_video_id: None,
             nav: NavigationManager::new(NavPage::new("home")),
             keymap,
@@ -855,6 +860,7 @@ impl AppModel {
                     now.shuffle,
                     now.repeat.into(),
                 );
+                self.player.thumbnail_url = now.thumbnail_url;
                 // When the queue view is visible, re-snapshot so the ▶ marker
                 // stays accurate as tracks advance (FetchQueue is cheap — the
                 // runtime replies instantly with the current queue state).
@@ -2208,7 +2214,10 @@ impl AppModel {
             self.filter
                 .render(frame, chunks[2], &self.theme, visible, total);
         }
-        PlayerBar.render(frame, chunks[3], &self.player, &self.theme);
+        PlayerBar {
+            artwork_enabled: self.player_artwork_enabled,
+        }
+        .render(frame, chunks[3], &self.player, &self.theme);
 
         let overlay_area = Rect {
             height: chunks[0].height + chunks[1].height,
@@ -2241,24 +2250,28 @@ impl AppModel {
     }
 
     fn artwork_scene(&self, area: Rect, revision: u64) -> ArtworkScene {
-        if self.view != View::Queue || self.popups.is_open() {
-            return ArtworkScene {
-                revision,
-                images: vec![],
-            };
-        }
         let chunks = self.frame_chunks(area);
+        // The footer stays outside the popup/toast area on every page.
+        let mut images: Vec<_> = PlayerBar {
+            artwork_enabled: self.player_artwork_enabled,
+        }
+        .artwork_placement(chunks[3], &self.player)
+        .into_iter()
+        .collect();
+        if self.view != View::Queue || self.popups.is_open() {
+            return ArtworkScene { revision, images };
+        }
         let overlay_area = Rect {
             height: chunks[0].height + chunks[1].height,
             ..area
         };
         let toasts = self.toasts.occupied_areas(overlay_area);
-        let images = self
-            .queue_view
-            .artwork_placements(chunks[1])
-            .into_iter()
-            .filter(|image| !toasts.iter().any(|rect| rect.intersects(image.area)))
-            .collect();
+        images.extend(
+            self.queue_view
+                .artwork_placements(chunks[1])
+                .into_iter()
+                .filter(|image| !toasts.iter().any(|rect| rect.intersects(image.area))),
+        );
         ArtworkScene { revision, images }
     }
 
@@ -2583,6 +2596,66 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ytmusic_api::{AlbumInfo, HomeSection, HomeSectionItem, PlaylistInfo, Track};
+
+    #[test]
+    fn footer_cover_follows_playback_on_every_page_and_stays_below_popups() {
+        let mut model = model_with_current_track();
+        model.player_artwork_enabled = true;
+        let area = Rect::new(0, 0, 120, 30);
+        for view in [
+            View::Home,
+            View::Search,
+            View::Library,
+            View::Playlist,
+            View::Album,
+            View::Artist,
+            View::Lyrics,
+            View::History,
+            View::Queue,
+        ] {
+            model.view = view;
+            let scene = model.artwork_scene(area, 7);
+            assert_eq!(scene.revision, 7);
+            assert_eq!(scene.images.len(), 1);
+            let image = &scene.images[0];
+            assert_eq!(image.identifier, "now-playing");
+            assert_eq!(image.url, "https://example.test/v1.jpg");
+            let footer = model.frame_chunks(area)[3];
+            assert_eq!(image.area.y, footer.y + 1);
+            assert_eq!(image.area.bottom(), footer.bottom());
+        }
+        model.popups = PopupState::Theme(ThemePopup::new(vec!["nord".into()], "nord"));
+        model.push_toast("A notification", Severity::Info);
+        assert_eq!(model.artwork_scene(area, 0).images.len(), 1);
+        fold(&mut model, AppEvent::PlayerPaused(true));
+        assert_eq!(model.artwork_scene(area, 0).images.len(), 1);
+        let next = ytmusic_tui::app::NowPlaying {
+            title: "Next song".into(),
+            artist: "Band".into(),
+            album: "Album".into(),
+            thumbnail_url: "https://example.test/next.jpg".into(),
+            video_id: "next".into(),
+            duration_seconds: 180.0,
+            shuffle: false,
+            repeat: ytmusic_tui::queue::RepeatMode::Off,
+        };
+        fold(&mut model, AppEvent::NowPlaying(next.clone()));
+        assert_eq!(
+            model.artwork_scene(area, 0).images[0].url,
+            next.thumbnail_url
+        );
+        fold(
+            &mut model,
+            AppEvent::NowPlaying(ytmusic_tui::app::NowPlaying {
+                thumbnail_url: String::new(),
+                ..next
+            }),
+        );
+        assert!(model.artwork_scene(area, 0).images.is_empty());
+        model.player.thumbnail_url = "https://example.test/cover.jpg".into();
+        fold(&mut model, AppEvent::PlaybackStopped);
+        assert!(model.artwork_scene(area, 0).images.is_empty());
+    }
 
     #[test]
     fn queue_images_respect_filter_player_popup_and_toast_boundaries() {
@@ -3000,6 +3073,7 @@ mod tests {
                 title: "Get Lucky".to_owned(),
                 artist: "Daft Punk".to_owned(),
                 album: "Random Access Memories".to_owned(),
+                thumbnail_url: "https://example.test/v1.jpg".into(),
                 video_id: "v1".to_owned(),
                 duration_seconds: 248.0,
                 shuffle: false,
@@ -4158,6 +4232,7 @@ mod tests {
                 title: "Around the World".to_owned(),
                 artist: "Daft Punk".to_owned(),
                 album: "Homework".to_owned(),
+                thumbnail_url: "https://example.test/v1.jpg".into(),
                 video_id: "v1".to_owned(),
                 duration_seconds: 425.0,
                 shuffle: true,
@@ -4576,6 +4651,7 @@ mod tests {
             title: "Song".to_owned(),
             artist: "Band".to_owned(),
             album: "LP".to_owned(),
+            thumbnail_url: "https://example.test/v1.jpg".into(),
             video_id: "v1".to_owned(),
             duration_seconds: 200.0,
             shuffle: false,
@@ -4602,6 +4678,7 @@ mod tests {
             title: "Song".to_owned(),
             artist: "Band".to_owned(),
             album: "LP".to_owned(),
+            thumbnail_url: "https://example.test/v2.jpg".into(),
             video_id: "v2".to_owned(),
             duration_seconds: 150.0,
             shuffle: false,
