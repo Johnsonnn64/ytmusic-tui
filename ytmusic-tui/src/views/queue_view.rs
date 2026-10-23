@@ -25,6 +25,8 @@
 //! re-snapshot the queue. This keeps the `▶` marker accurate as tracks
 //! advance (the same FetchQueue path used when the view is first opened).
 
+use std::cell::Cell;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -34,7 +36,13 @@ use ytmusic_api::Track;
 
 use super::filter_bar::matches_filter;
 use super::{PageState, Theme, borderless_table, table_header, table_row};
+use crate::artwork::Placement;
 use crate::formatting::format_duration;
+
+const ART_ROW_HEIGHT: u16 = 3;
+const ART_WIDTH: u16 = 6;
+const ART_COLUMN_WIDTH: u16 = ART_WIDTH + 2;
+const ART_MIN_WIDTH: u16 = 70;
 
 /// A point-in-time snapshot of the queue (sent from the runtime thread).
 ///
@@ -76,6 +84,10 @@ pub struct QueueView {
     /// loop from the filter bar. Navigation, the `▶` marker, and "jump to" all
     /// operate over the filtered subset when set.
     filter: Option<String>,
+    artwork_enabled: bool,
+    /// Shared by text and image layout; counts filtered rows, not terminal
+    /// lines. Interior mutability keeps rendering compatible with other views.
+    artwork_offset: Cell<usize>,
 }
 
 impl Default for QueueView {
@@ -92,6 +104,8 @@ impl QueueView {
             state: PageState::Loading,
             cursor: 0,
             filter: None,
+            artwork_enabled: false,
+            artwork_offset: Cell::new(0),
         }
     }
 
@@ -99,6 +113,14 @@ impl QueueView {
     #[must_use]
     pub fn state(&self) -> &PageState<QueueSnapshot> {
         &self.state
+    }
+
+    /// Enable tall Queue rows only while an image backend is available.
+    pub fn set_artwork_enabled(&mut self, enabled: bool) {
+        if self.artwork_enabled != enabled {
+            self.artwork_enabled = enabled;
+            self.artwork_offset.set(0);
+        }
     }
 
     // -- Data loading --------------------------------------------------------
@@ -123,6 +145,7 @@ impl QueueView {
         self.state = PageState::Loading;
         self.cursor = 0;
         self.filter = None;
+        self.artwork_offset.set(0);
     }
 
     /// Transition into the error state.
@@ -138,6 +161,7 @@ impl QueueView {
         if new != self.filter {
             self.filter = new;
             self.cursor = 0;
+            self.artwork_offset.set(0);
         }
     }
 
@@ -239,6 +263,67 @@ impl QueueView {
         self.render_tracks(frame, chunks[1], theme);
     }
 
+    fn uses_artwork(&self, area: Rect) -> bool {
+        self.artwork_enabled && area.width >= ART_MIN_WIDTH && area.height >= ART_ROW_HEIGHT + 2
+    }
+
+    /// Return the exact filtered row slice shared by text and artwork. Only
+    /// complete three-line rows fit; images can never extend into the player.
+    fn artwork_rows(&self, area: Rect) -> Vec<(usize, Rect)> {
+        if !self.uses_artwork(area) {
+            return Vec::new();
+        }
+        let visible = self.visible_indices();
+        let capacity = usize::from((area.height - 2) / ART_ROW_HEIGHT);
+        let selected = self.cursor.min(visible.len().saturating_sub(1));
+        let mut offset = self
+            .artwork_offset
+            .get()
+            .min(visible.len().saturating_sub(capacity));
+        if selected < offset {
+            offset = selected;
+        } else if selected >= offset + capacity {
+            offset = selected + 1 - capacity;
+        }
+        self.artwork_offset.set(offset);
+        visible
+            .into_iter()
+            .skip(offset)
+            .take(capacity)
+            .enumerate()
+            .map(|(slot, original)| {
+                (
+                    original,
+                    Rect {
+                        x: area.x + 5 + 1,                            // position lane, then cell padding
+                        y: area.y + 2 + slot as u16 * ART_ROW_HEIGHT, // status + header
+                        width: ART_WIDTH,
+                        height: ART_ROW_HEIGHT,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Images for the current viewport, in terminal cell coordinates. Missing
+    /// URLs leave a placeholder and never cause extra metadata API requests.
+    pub fn artwork_placements(&self, area: Rect) -> Vec<Placement> {
+        let Some(snapshot) = self.state.loaded() else {
+            return Vec::new();
+        };
+        self.artwork_rows(area)
+            .into_iter()
+            .filter_map(|(original, rect)| {
+                let track = &snapshot.tracks[original];
+                (!track.thumbnail_url.is_empty()).then(|| Placement {
+                    identifier: format!("queue-{original}"),
+                    url: track.thumbnail_url.clone(),
+                    area: rect,
+                })
+            })
+            .collect()
+    }
+
     fn render_status(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let (text, is_error) = self.status_text();
         let style = if is_error {
@@ -282,6 +367,17 @@ impl QueueView {
         let PageState::Loaded(snap) = &self.state else {
             return;
         };
+        // render_tracks receives the table area; reconstruct the view area
+        // used by artwork_placements so both use identical geometry.
+        let view_area = Rect {
+            y: area.y.saturating_sub(1),
+            height: area.height.saturating_add(1),
+            ..area
+        };
+        if self.uses_artwork(view_area) {
+            self.render_artwork_tracks(frame, area, view_area, theme, snap);
+            return;
+        }
         let visible = self.visible_indices();
 
         // Keep the original queue position number and the current-track marker
@@ -305,6 +401,57 @@ impl QueueView {
         let mut state = TableState::default();
         if !visible.is_empty() {
             state.select(Some(self.cursor.min(visible.len() - 1)));
+        }
+        frame.render_stateful_widget(table, area, &mut state);
+    }
+
+    fn render_artwork_tracks(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        view_area: Rect,
+        theme: &Theme,
+        snapshot: &QueueSnapshot,
+    ) {
+        let visible = self.artwork_rows(view_area);
+        let rows = visible
+            .iter()
+            .map(|(original, _)| {
+                let track = &snapshot.tracks[*original];
+                let mut columns = queue_columns(
+                    original + 1,
+                    track,
+                    snapshot.current_index == Some(*original),
+                );
+                columns.insert(1, "◇".into());
+                for column in &mut columns {
+                    *column = format!("\n {column} \n");
+                }
+                table_row(theme, &columns, true).height(ART_ROW_HEIGHT)
+            })
+            .collect();
+        let header = table_header(
+            theme,
+            &["#", "", "Title", "Artist", "Album", "Duration"],
+            true,
+        );
+        let table = borderless_table(
+            theme,
+            header,
+            rows,
+            vec![
+                Constraint::Length(5),
+                Constraint::Length(ART_COLUMN_WIDTH),
+                Constraint::Min(12),
+                Constraint::Percentage(22),
+                Constraint::Percentage(22),
+                Constraint::Length(10),
+            ],
+            true,
+        );
+        let mut state = TableState::default();
+        if !visible.is_empty() {
+            state.select(Some(self.cursor.saturating_sub(self.artwork_offset.get())));
         }
         frame.render_stateful_widget(table, area, &mut state);
     }
@@ -351,6 +498,150 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    fn artwork_queue(count: usize) -> QueueView {
+        let mut view = QueueView::new();
+        view.set_snapshot(QueueSnapshot {
+            tracks: (0..count)
+                .map(|index| {
+                    Track::new(
+                        format!("v{index}"),
+                        format!("Song {index:03}"),
+                        "Artist",
+                        "Album",
+                        180.0,
+                        format!("https://example.test/cover-{index}.jpg"),
+                    )
+                })
+                .collect(),
+            current_index: Some(0),
+        });
+        view.set_artwork_enabled(true);
+        view
+    }
+
+    #[test]
+    fn hundred_track_queue_only_places_visible_images_and_scrolls_with_cursor() {
+        let mut view = artwork_queue(100);
+        let area = Rect::new(0, 0, 120, 12);
+        let first = view.artwork_placements(area);
+        assert_eq!(first.len(), 3);
+        assert_eq!(first[0].identifier, "queue-0");
+        assert_eq!(first[2].area, Rect::new(6, 8, 6, 3));
+        for _ in 0..99 {
+            view.select_next();
+        }
+        let last = view.artwork_placements(area);
+        assert_eq!(last.len(), 3);
+        assert_eq!(last[0].identifier, "queue-97");
+        assert_eq!(last[2].identifier, "queue-99");
+        assert!(
+            last.iter()
+                .all(|image| area.contains(image.area.as_position())
+                    && image.area.bottom() <= area.bottom())
+        );
+        let text = render_to_string(&view, 120, 12);
+        assert!(text.contains("Song 099"));
+        assert!(!text.contains("Song 000"));
+    }
+
+    #[test]
+    fn artwork_and_text_share_three_line_rows_with_centered_details() {
+        let view = artwork_queue(3);
+        let text = render_to_string(&view, 120, 12);
+        let lines: Vec<_> = text.lines().collect();
+        for (index, image) in view
+            .artwork_placements(Rect::new(0, 0, 120, 12))
+            .iter()
+            .enumerate()
+        {
+            assert!(lines[usize::from(image.area.y + 1)].contains(&format!("Song {index:03}")));
+            assert!(!lines[usize::from(image.area.y)].contains("Song"));
+            assert!(!lines[usize::from(image.area.y + 2)].contains("Song"));
+        }
+    }
+
+    #[test]
+    fn artwork_filter_preserves_original_identifiers_and_resets_scroll() {
+        let mut view = artwork_queue(100);
+        for _ in 0..99 {
+            view.select_next();
+        }
+        let area = Rect::new(0, 0, 120, 12);
+        view.artwork_placements(area);
+        view.set_filter(Some("Song 007"));
+        let images = view.artwork_placements(area);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].identifier, "queue-7");
+        assert_eq!(images[0].area.y, 2);
+        match view.activate_selected().unwrap() {
+            QueueAction::JumpTo {
+                tracks,
+                start_index,
+            } => {
+                assert_eq!(start_index, 0);
+                assert_eq!(tracks[0].video_id, "v7");
+            }
+        }
+    }
+
+    #[test]
+    fn artwork_resize_and_queue_shrink_keep_selected_row_inside_viewport() {
+        let mut view = artwork_queue(100);
+        for _ in 0..99 {
+            view.select_next();
+        }
+        let small = view.artwork_placements(Rect::new(4, 2, 120, 5));
+        assert_eq!(small.len(), 1);
+        assert_eq!(small[0].identifier, "queue-99");
+        assert_eq!(small[0].area, Rect::new(10, 4, 6, 3));
+        view.set_snapshot(QueueSnapshot {
+            tracks: vec![Track::new(
+                "new",
+                "New",
+                "",
+                "",
+                0.0,
+                "https://example.test/new.jpg",
+            )],
+            current_index: Some(0),
+        });
+        let images = view.artwork_placements(Rect::new(0, 0, 120, 12));
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].identifier, "queue-0");
+        assert_eq!(images[0].area.y, 2);
+    }
+
+    #[test]
+    fn narrow_disabled_and_tiny_views_use_compact_rows_without_images() {
+        let mut view = artwork_queue(3);
+        assert!(view.artwork_placements(Rect::new(0, 0, 69, 12)).is_empty());
+        assert!(view.artwork_placements(Rect::new(0, 0, 120, 4)).is_empty());
+        let narrow = render_to_string(&view, 69, 12);
+        assert!(narrow.lines().nth(2).unwrap().contains("Song 000"));
+        view.set_artwork_enabled(false);
+        assert!(view.artwork_placements(Rect::new(0, 0, 120, 12)).is_empty());
+        assert!(
+            render_to_string(&view, 120, 12)
+                .lines()
+                .nth(2)
+                .unwrap()
+                .contains("Song 000")
+        );
+    }
+
+    #[test]
+    fn missing_artwork_keeps_placeholder_without_requesting_an_empty_url() {
+        let mut view = artwork_queue(1);
+        view.set_snapshot(QueueSnapshot {
+            tracks: vec![make_track("v1", "No cover", "Artist")],
+            current_index: Some(0),
+        });
+        assert!(view.artwork_placements(Rect::new(0, 0, 120, 12)).is_empty());
+        let text = render_to_string(&view, 120, 12);
+        assert!(text.contains("No cover"));
+        assert!(text.contains('◇'));
+    }
 
     // -- fixtures ------------------------------------------------------------
 

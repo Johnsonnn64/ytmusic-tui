@@ -46,6 +46,7 @@ use ratatui::widgets::{Block, Paragraph};
 
 use ytmusic_api::{BrowserAuth, InnerTubeClient};
 use ytmusic_tui::app::{AppCommand, AppEvent, RuntimeHandle, spawn_runtime};
+use ytmusic_tui::artwork::{ArtworkManager, Scene as ArtworkScene};
 use ytmusic_tui::config::{self, AppConfig};
 use ytmusic_tui::demo::{self, DemoScreen};
 use ytmusic_tui::keymap::{Action, Keymap, Resolution};
@@ -392,7 +393,14 @@ fn run_loop(
     // Surface dropped keymap bindings once, on the status line.
     model.set_keymap_warnings(&keymap_warnings);
 
+    let mut artwork = ArtworkManager::new(config.ui.queue_artwork);
+    let mut artwork_revision = 0_u64;
+
     while !model.should_quit {
+        if let Some(message) = artwork.poll() {
+            model.push_toast(format!("Queue artwork: {message}"), Severity::Info);
+        }
+        model.queue_view.set_artwork_enabled(artwork.is_available());
         // Drain events that arrived since the last tick before drawing, so the
         // frame reflects the latest player position / loaded data.
         drain_events(events, &mut model, runtime);
@@ -405,16 +413,29 @@ fn run_loop(
         // when no key is pressed (the ~60 ms poll drives this).
         model.prune_toasts();
 
-        terminal.draw(|frame| model.render(frame))?;
+        let mut scene = ArtworkScene::default();
+        terminal.draw(|frame| {
+            model.render(frame);
+            scene = model.artwork_scene(frame.area(), artwork_revision);
+        })?;
+        artwork.update(scene);
 
         // Block up to POLL_INTERVAL for input; on timeout, loop to redraw
         // (the player bar advances from drained progress events).
-        if event::poll(POLL_INTERVAL)?
-            && let Event::Key(key) = event::read()?
-        {
-            // Only react to presses (Windows also emits Release/Repeat).
-            if key.kind == KeyEventKind::Press {
-                model.dispatch_key(key, runtime);
+        if event::poll(POLL_INTERVAL)? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    model.dispatch_key(key, runtime);
+                }
+                Event::Resize(_, _) => {
+                    artwork_revision = artwork_revision.wrapping_add(1);
+                    // Remove old overlays before redrawing at new coordinates.
+                    artwork.update(ArtworkScene {
+                        revision: artwork_revision,
+                        images: vec![],
+                    });
+                }
+                _ => {}
             }
         }
     }
@@ -2166,21 +2187,7 @@ impl AppModel {
             area,
         );
 
-        let header_lines = self.header_line_count();
-        // The filter bar takes its own fixed-height row just above the player
-        // bar when active; otherwise the content extends to the player bar.
-        let filter_rows = if self.filter.is_active() {
-            FILTER_BAR_HEIGHT
-        } else {
-            0
-        };
-        let chunks = Layout::vertical([
-            Constraint::Length(header_lines),
-            Constraint::Min(1),
-            Constraint::Length(filter_rows),
-            Constraint::Length(PLAYER_BAR_HEIGHT),
-        ])
-        .split(area);
+        let chunks = self.frame_chunks(area);
 
         self.render_header(frame, chunks[0]);
         match self.view {
@@ -2203,24 +2210,56 @@ impl AppModel {
         }
         PlayerBar.render(frame, chunks[3], &self.player, &self.theme);
 
-        // The popup overlay is drawn last so it floats over everything, centered
-        // on the content area (above the player bar).
-        if self.popups.is_open() {
-            let overlay_area = Rect {
-                height: chunks[0].height + chunks[1].height,
-                ..area
-            };
-            self.popups.render(frame, overlay_area, &self.theme);
-        }
-
-        // Toasts float on top of even the popups, anchored to the bottom-right
-        // above the player bar (Python's `notify()` toast rack). The content +
-        // header area excludes the docked player and filter bars.
-        let toast_area = Rect {
+        let overlay_area = Rect {
             height: chunks[0].height + chunks[1].height,
             ..area
         };
-        self.toasts.render(frame, toast_area, &self.theme);
+        if self.popups.is_open() {
+            self.popups.render(frame, overlay_area, &self.theme);
+        }
+        self.toasts.render(frame, overlay_area, &self.theme);
+    }
+
+    /// The shared text/image layout excludes status, filter, and player bars.
+    fn frame_chunks(&self, area: Rect) -> [Rect; 4] {
+        let header_lines = self.header_line_count();
+        // The filter bar takes its own fixed-height row just above the player
+        // bar when active; otherwise the content extends to the player bar.
+        let filter_rows = if self.filter.is_active() {
+            FILTER_BAR_HEIGHT
+        } else {
+            0
+        };
+        let chunks = Layout::vertical([
+            Constraint::Length(header_lines),
+            Constraint::Min(1),
+            Constraint::Length(filter_rows),
+            Constraint::Length(PLAYER_BAR_HEIGHT),
+        ])
+        .split(area);
+        [chunks[0], chunks[1], chunks[2], chunks[3]]
+    }
+
+    fn artwork_scene(&self, area: Rect, revision: u64) -> ArtworkScene {
+        if self.view != View::Queue || self.popups.is_open() {
+            return ArtworkScene {
+                revision,
+                images: vec![],
+            };
+        }
+        let chunks = self.frame_chunks(area);
+        let overlay_area = Rect {
+            height: chunks[0].height + chunks[1].height,
+            ..area
+        };
+        let toasts = self.toasts.occupied_areas(overlay_area);
+        let images = self
+            .queue_view
+            .artwork_placements(chunks[1])
+            .into_iter()
+            .filter(|image| !toasts.iter().any(|rect| rect.intersects(image.area)))
+            .collect();
+        ArtworkScene { revision, images }
     }
 
     /// Number of header rows currently needed.
@@ -2544,6 +2583,60 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ytmusic_api::{AlbumInfo, HomeSection, HomeSectionItem, PlaylistInfo, Track};
+
+    #[test]
+    fn queue_images_respect_filter_player_popup_and_toast_boundaries() {
+        use ytmusic_tui::views::queue_view::QueueSnapshot;
+        let mut model = AppModel::new(Theme::default());
+        model.view = View::Queue;
+        model.queue_view.set_artwork_enabled(true);
+        model.queue_view.set_snapshot(QueueSnapshot {
+            tracks: (0..20)
+                .map(|index| {
+                    Track::new(
+                        format!("v{index}"),
+                        format!("Song {index}"),
+                        "Artist",
+                        "Album",
+                        10.0,
+                        "https://example.test/cover.jpg",
+                    )
+                })
+                .collect(),
+            current_index: Some(0),
+        });
+        let area = Rect::new(0, 0, 120, 30);
+        let scene = model.artwork_scene(area, 0);
+        assert!(!scene.images.is_empty());
+        let content = model.frame_chunks(area)[1];
+        assert!(
+            scene
+                .images
+                .iter()
+                .all(|image| image.area.bottom() <= content.bottom())
+        );
+        model.popups = PopupState::Theme(ThemePopup::new(vec!["nord".into()], "nord"));
+        assert!(model.artwork_scene(area, 0).images.is_empty());
+        model.popups = PopupState::None;
+        // On a narrow-but-supported terminal a toast spans the artwork lane.
+        model.push_toast("A notification", Severity::Info);
+        let narrow = Rect::new(0, 0, 70, 30);
+        let chunks = model.frame_chunks(narrow);
+        let toast_area = Rect {
+            height: chunks[0].height + chunks[1].height,
+            ..narrow
+        };
+        let toasts = model.toasts.occupied_areas(toast_area);
+        assert!(
+            model
+                .artwork_scene(narrow, 0)
+                .images
+                .iter()
+                .all(|image| !toasts.iter().any(|toast| toast.intersects(image.area)))
+        );
+        model.view = View::Home;
+        assert!(model.artwork_scene(area, 0).images.is_empty());
+    }
 
     // -- nav-key mapping ---------------------------------------------------
     //

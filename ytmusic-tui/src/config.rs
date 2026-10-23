@@ -76,6 +76,7 @@ struct RawPlayerConfig {
 #[derive(Debug, Deserialize, Default)]
 struct RawUiConfig {
     theme: Option<String>,
+    queue_artwork: Option<bool>,
 }
 
 /// Top-level raw config, deserialized directly from TOML.
@@ -135,12 +136,15 @@ impl Default for PlayerConfig {
 pub struct UiConfig {
     /// Name of the active color theme (e.g. `"synthwave"`).
     pub theme: String,
+    /// Display Queue thumbnails with ueberzugpp on X11 when available.
+    pub queue_artwork: bool,
 }
 
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
             theme: "synthwave".to_owned(),
+            queue_artwork: true,
         }
     }
 }
@@ -210,6 +214,7 @@ impl MergeSection for RawUiConfig {
     fn merge(self, over: Self) -> Self {
         Self {
             theme: over.theme.or(self.theme),
+            queue_artwork: over.queue_artwork.or(self.queue_artwork),
         }
     }
 }
@@ -244,6 +249,7 @@ fn build_config(raw: RawAppConfig) -> AppConfig {
         },
         ui: UiConfig {
             theme: ui_raw.theme.unwrap_or(defaults.ui.theme),
+            queue_artwork: ui_raw.queue_artwork.unwrap_or(defaults.ui.queue_artwork),
         },
     }
 }
@@ -589,6 +595,20 @@ mod tests {
         assert_eq!(cfg.player.backend, "mpv");
         assert_eq!(cfg.player.audio_quality, "high");
         assert_eq!(cfg.ui.theme, "synthwave");
+        assert!(cfg.ui.queue_artwork);
+    }
+
+    #[test]
+    fn queue_artwork_can_be_disabled_without_overriding_other_ui_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_temp_toml(&tmp, "user.toml", "[ui]\nqueue_artwork = false\n");
+        let config = load_config(
+            Some(&path),
+            Some("[ui]\ntheme = 'nord'\nqueue_artwork = true\n"),
+        )
+        .unwrap();
+        assert!(!config.ui.queue_artwork);
+        assert_eq!(config.ui.theme, "nord");
     }
 
     // Note: Rust structs are not "frozen" in the Python sense; immutability is

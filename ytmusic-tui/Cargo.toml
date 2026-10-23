@@ -42,6 +42,12 @@ serde = { version = "1", features = ["derive"] }
 # explicit for the binary's own use.
 serde_json = "1"
 
+# Queue artwork downloads reuse the API client's HTTP/TLS dependency. Images
+# are decoded/resized by ueberzugpp, outside the terminal rendering thread.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+sha1 = "0.11"
+tempfile = "3"
+
 # libmpv binding for the audio player (M2). 6.0.0 builds against system
 # libmpv >= 2.x and exposes the end-file reason as a discriminable value,
 # which is the non-negotiable selection criterion (see spikes/mpv_spike).
@@ -118,6 +124,7 @@ base64 = { version = "0.22", default-features = false, features = ["std"] }
 # directly so the user does not have to paste DevTools headers by hand.
 rookie = "0.5.6"
 
-[dev-dependencies]
-# Temporary directory support for config-loading tests.
-tempfile = "3"
+[target.'cfg(unix)'.dependencies]
+# ueberzugpp's center-origin option rounds to whole cells. X11 geometry lets
+# the artwork worker center the actual rendered image vertically in pixels.
+x11rb = { version = "0.13", default-features = false, features = ["res"] }

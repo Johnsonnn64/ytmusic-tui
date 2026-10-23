@@ -206,8 +206,24 @@ impl ToastManager {
     /// closest to the player bar and older ones rise above it). Each box is
     /// [`Clear`]ed first so it fully occludes the view underneath.
     pub fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        for (toast, toast_area) in self.placements(area) {
+            render_one(frame, toast_area, theme, toast);
+        }
+    }
+
+    /// Rectangles occupied by notifications, also used to occlude external
+    /// artwork so an X11 image cannot cover a toast.
+    pub fn occupied_areas(&self, area: Rect) -> Vec<Rect> {
+        self.placements(area)
+            .into_iter()
+            .map(|(_, rect)| rect)
+            .collect()
+    }
+
+    fn placements(&self, area: Rect) -> Vec<(&Toast, Rect)> {
+        let mut placements = Vec::new();
         if self.toasts.is_empty() || area.width < 6 || area.height < 3 {
-            return;
+            return placements;
         }
 
         let width = TOAST_WIDTH.min(area.width);
@@ -231,9 +247,10 @@ impl ToastManager {
                 width,
                 height,
             };
-            render_one(frame, toast_area, theme, toast);
+            placements.push((*toast, toast_area));
             bottom = top;
         }
+        placements
     }
 }
 

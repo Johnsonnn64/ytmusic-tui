@@ -1,4 +1,5 @@
 pub mod app;
+pub mod artwork;
 pub mod auth_cli;
 pub mod clipboard;
 pub mod config;

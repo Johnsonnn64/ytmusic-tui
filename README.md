@@ -32,6 +32,9 @@ designed for tiling WM setups.
 - **3-pane library** — Playlists, Albums, and Artists tabs (Tab to cycle)
 - **Album and Artist views** — dedicated detail pages
 - **Queue management** with shuffle and repeat
+- **Queue artwork** — optional album thumbnails via ueberzugpp on X11, with
+  three-line rows and vertically centered covers and song details. Only visible covers are loaded;
+  other views retain their compact layout.
 - **Radio** — start a YouTube Music radio from any track (`R`); playback also
   continues automatically with radio when a song, album, or playlist ends.
   Repeat one/all take precedence. Recommendations load in the background during
@@ -228,7 +231,19 @@ audio_quality = "high"  # low / normal / high
 
 [ui]
 theme = "synthwave"  # synthwave / nord / gruvbox / catppuccin
+queue_artwork = true # Queue thumbnails with ueberzugpp on X11; false = compact rows
 ```
+
+Queue artwork starts automatically when `ueberzugpp` (or its `ueberzug` alias)
+is installed and an X11 display is available. It uses three-line rows at terminal
+widths of at least 70 columns, with compact rows as the fallback. Artwork is
+currently limited to the Queue view (`q`); other views keep their existing layout.
+Missing covers show a placeholder. Downloads run in the background, two at a
+time, and only visible images are displayed. The thumbnail cache lives under
+`$XDG_CACHE_HOME/ytmusic-tui/artwork` (normally `~/.cache/ytmusic-tui/artwork`),
+with budgets of 256 files / 64 MiB; visible files are protected from eviction.
+Opening a popup hides the images until it closes. Renderer failures restore the
+compact layout without interrupting playback.
 
 ### keymap.toml
 
