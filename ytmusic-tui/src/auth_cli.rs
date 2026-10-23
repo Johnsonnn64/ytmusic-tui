@@ -34,6 +34,9 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
+#[cfg(target_os = "linux")]
+mod firefox;
+
 /// The hardcoded default path the subcommand writes to.
 ///
 /// Matches the default in `config/default.toml`. The auth subcommand runs
@@ -361,7 +364,16 @@ fn call_rookie(
     domains: Option<Vec<String>>,
 ) -> rookie::Result<Vec<rookie::enums::Cookie>> {
     match kind {
-        BrowserKind::Firefox => rookie::firefox(domains),
+        BrowserKind::Firefox => {
+            #[cfg(target_os = "linux")]
+            {
+                firefox::extract(domains)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                rookie::firefox(domains)
+            }
+        }
         BrowserKind::Librewolf => rookie::librewolf(domains),
         BrowserKind::Zen => rookie::zen(domains),
         BrowserKind::Chrome => rookie::chrome(domains),

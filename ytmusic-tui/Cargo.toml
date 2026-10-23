@@ -123,6 +123,8 @@ base64 = { version = "0.22", default-features = false, features = ["std"] }
 # encrypted SQLite (with keyring decryption), Safari, etc. Pulls the YTM cookies
 # directly so the user does not have to paste DevTools headers by hand.
 rookie = "0.5.6"
+# Reuse rookie's INI parser to locate Firefox profiles under XDG_CONFIG_HOME.
+rust-ini = "0.21"
 
 [target.'cfg(unix)'.dependencies]
 # ueberzugpp's center-origin option rounds to whole cells. X11 geometry lets
