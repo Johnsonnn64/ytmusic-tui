@@ -16,8 +16,8 @@ use tokio::task::{AbortHandle, JoinSet};
 
 use super::{Placement, Scene, Status};
 
-mod alignment;
-use alignment::VerticalAlignment;
+mod windows;
+use windows::ImageWindows;
 
 const MAX_DOWNLOADS: usize = 2;
 const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
@@ -129,8 +129,8 @@ async fn work(
                 .map_err(|_| "Artwork renderer disconnected")?;
             displayed = resolved;
             revision = scene.revision;
-            if let Some(alignment) = &mut layer.alignment {
-                alignment.center(&displayed);
+            if let Some(windows) = &mut layer.windows {
+                windows.refresh(&displayed);
             }
         }
 
@@ -169,9 +169,9 @@ async fn work(
                     return Err("Artwork renderer exited".into());
                 }
                 // The renderer creates its windows asynchronously after IPC.
-                // Check for new windows; already centered XIDs need no updates.
-                if let Some(alignment) = &mut layer.alignment {
-                    alignment.center(&displayed);
+                // Prepare each new window once; ready XIDs need no updates.
+                if let Some(windows) = &mut layer.windows {
+                    windows.refresh(&displayed);
                 }
             }
         }
@@ -310,7 +310,7 @@ struct Layer {
     child: Child,
     socket: PathBuf,
     _directory: tempfile::TempDir,
-    alignment: Option<VerticalAlignment>,
+    windows: Option<ImageWindows>,
 }
 
 impl Layer {
@@ -349,12 +349,12 @@ impl Layer {
         let socket = directory
             .path()
             .join(format!("ueberzugpp-{}.socket", child.id()));
-        let alignment = VerticalAlignment::connect(child.id());
+        let windows = ImageWindows::connect(child.id());
         let mut layer = Self {
             child,
             socket,
             _directory: directory,
-            alignment,
+            windows,
         };
         for _ in 0..100 {
             if scenes.has_changed().is_err() {

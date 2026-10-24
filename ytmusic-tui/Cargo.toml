@@ -127,6 +127,6 @@ rookie = "0.5.6"
 rust-ini = "0.21"
 
 [target.'cfg(unix)'.dependencies]
-# ueberzugpp's center-origin option rounds to whole cells. X11 geometry lets
-# the artwork worker center the actual rendered image vertically in pixels.
+# X11 geometry lets the artwork worker center images in pixels and request
+# initial redraws for thumbnails that ueberzugpp leaves buffered.
 x11rb = { version = "0.13", default-features = false, features = ["res"] }
