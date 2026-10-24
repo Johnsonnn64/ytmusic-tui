@@ -18,6 +18,7 @@ browser.json
 client_secret.json
 
 # Internal docs (not for public repo)
+TODO.md
 CLAUDE.md
 DESIGN.md
 HANDOFF.md
