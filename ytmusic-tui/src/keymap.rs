@@ -92,6 +92,8 @@ pub enum Action {
     SwitchLibrary,
     /// Switch to the queue view (`switch_queue`, default `q`).
     SwitchQueue,
+    /// Remove the selected track in the queue view (`remove_from_queue`, default `d`).
+    RemoveFromQueue,
     /// Switch to the history view (`switch_history`, default `H`).
     SwitchHistory,
     /// Open lyrics for the current track (`open_lyrics`, default `L`).
@@ -311,6 +313,7 @@ fn action_for_name(name: &str) -> Option<Action> {
         "search_page" => Action::SearchPage,
         "switch_library" => Action::SwitchLibrary,
         "switch_queue" => Action::SwitchQueue,
+        "remove_from_queue" => Action::RemoveFromQueue,
         "switch_history" => Action::SwitchHistory,
         "open_lyrics" => Action::SwitchLyrics,
         "open_action_popup" => Action::OpenActionPopup,
@@ -688,6 +691,24 @@ mod tests {
         assert_eq!(
             km.resolve(ch('T')),
             Resolution::Action(Action::OpenThemePopup)
+        );
+    }
+
+    #[test]
+    fn queue_removal_defaults_to_d_and_can_be_rebound() {
+        let mut km = Keymap::defaults();
+        assert_eq!(
+            km.resolve(ch('d')),
+            Resolution::Action(Action::RemoveFromQueue)
+        );
+        let mut km = Keymap::from_map(&HashMap::from([(
+            "remove_from_queue".to_owned(),
+            "x".to_owned(),
+        )]));
+        assert_eq!(km.resolve(ch('d')), Resolution::None);
+        assert_eq!(
+            km.resolve(ch('x')),
+            Resolution::Action(Action::RemoveFromQueue)
         );
     }
 

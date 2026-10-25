@@ -197,7 +197,7 @@ then restart.
 | `s`                            | Shuffle toggle                     |
 | `r`                            | Repeat toggle                      |
 | `+` / `-`                      | Volume up / down                   |
-| `d`                            | Remove from queue                  |
+| `d`                            | Remove selected song in Queue      |
 | `Esc`                          | Back (navigation history)          |
 | `Q`                            | Quit                               |
 

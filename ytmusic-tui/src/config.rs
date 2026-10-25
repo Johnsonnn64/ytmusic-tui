@@ -460,6 +460,7 @@ pub static DEFAULT_KEYMAP: &[(&str, &str)] = &[
     ("switch_home", "g"),
     ("switch_library", "l"),
     ("switch_queue", "q"),
+    ("remove_from_queue", "d"),
     ("quit", "Q"),
     ("open_current_artist", "a"),
     ("open_current_album", "A"),

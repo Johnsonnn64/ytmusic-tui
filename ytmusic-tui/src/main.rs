@@ -1206,6 +1206,13 @@ impl AppModel {
             Action::SearchPage => self.switch_view(View::Search, runtime),
             Action::SwitchLibrary => self.switch_view(View::Library, runtime),
             Action::SwitchQueue => self.switch_view(View::Queue, runtime),
+            Action::RemoveFromQueue => {
+                if self.view == View::Queue
+                    && let Some(item) = self.queue_view.selected_popup_item()
+                {
+                    self.handle_action(ActionKind::RemoveFromQueue, item, runtime);
+                }
+            }
             Action::SwitchHistory => self.switch_view(View::History, runtime),
             Action::SwitchLyrics => self.switch_view(View::Lyrics, runtime),
             Action::OpenActionPopup => self.open_action_popup(runtime),
@@ -3772,6 +3779,56 @@ mod tests {
             saw_create,
             "expected CreatePlaylistAndAdd with the typed name"
         );
+    }
+
+    #[test]
+    fn d_removes_the_highlighted_queue_track() {
+        let (runtime, mut rx) = RuntimeHandle::stub();
+        let mut model = AppModel::new(Theme::default());
+        model.view = View::Queue;
+        model
+            .queue_view
+            .set_snapshot(ytmusic_tui::views::queue_view::QueueSnapshot {
+                tracks: vec![
+                    Track::new("v1", "First", "A", "Al", 100.0, ""),
+                    Track::new("v2", "Second", "B", "Al", 120.0, ""),
+                ],
+                current_index: Some(0),
+            });
+        model.dispatch_key(key(KeyCode::Char('j')), &runtime);
+        model.dispatch_key(key(KeyCode::Char('d')), &runtime);
+        assert!(matches!(rx.try_recv(), Ok(AppCommand::RemoveFromQueue(id)) if id == "v2"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn d_does_not_remove_tracks_outside_queue_or_while_typing() {
+        let (runtime, mut rx) = RuntimeHandle::stub();
+        let mut model = model_on_history();
+        model.dispatch_key(key(KeyCode::Char('d')), &runtime);
+        assert!(rx.try_recv().is_err());
+
+        model.view = View::Queue;
+        model
+            .queue_view
+            .set_snapshot(ytmusic_tui::views::queue_view::QueueSnapshot {
+                tracks: vec![Track::new("v1", "First", "A", "Al", 100.0, "")],
+                current_index: Some(0),
+            });
+        model.dispatch_key(key(KeyCode::Char('/')), &runtime);
+        model.dispatch_key(key(KeyCode::Char('d')), &runtime);
+        assert_eq!(model.filter.query(), "d");
+        assert!(rx.try_recv().is_err());
+
+        model.dispatch_key(key(KeyCode::Esc), &runtime);
+        model
+            .queue_view
+            .set_snapshot(ytmusic_tui::views::queue_view::QueueSnapshot {
+                tracks: vec![],
+                current_index: None,
+            });
+        model.dispatch_key(key(KeyCode::Char('d')), &runtime);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
