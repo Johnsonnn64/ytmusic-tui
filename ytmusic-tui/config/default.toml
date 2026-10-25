@@ -10,6 +10,7 @@ audio_quality = "high"  # low / normal / high
 theme = "synthwave"
 queue_artwork = true  # Queue thumbnails via ueberzugpp on X11; false = compact rows
 player_artwork = true # Currently playing cover beside the bottom player bar
+notifications = true  # Desktop song notifications via notify-send, with album cover
 
 # Key bindings are configured separately via keymap.toml.
 # See: ~/.config/ytmusic-tui/keymap.toml and config/default_keymap.toml

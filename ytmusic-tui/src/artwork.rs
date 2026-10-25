@@ -8,6 +8,8 @@ use std::thread::JoinHandle;
 use ratatui::layout::Rect;
 use tokio::sync::watch;
 
+pub(crate) mod cache;
+
 #[cfg(unix)]
 mod x11;
 

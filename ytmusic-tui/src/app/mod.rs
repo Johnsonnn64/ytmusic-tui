@@ -358,10 +358,10 @@ pub enum AppEvent {
     /// A non-playback mutation (like/unlike, add-to-queue, add-to-playlist)
     /// succeeded; the string is a short user-facing confirmation toast.
     ActionResult(String),
-    /// The current track started loading in mpv. This collapses both mpv
-    /// `start-file` and `file-loaded` (see [`translate_player_event`]); M6's
-    /// MPRIS may need to split them for metadata publishing.
+    /// The current track started loading in mpv.
     PlayerStarted,
+    /// The stream finished loading; desktop notifications can now announce it.
+    PlayerLoaded,
     /// Playback stopped while waiting for radio, or after radio was exhausted.
     /// Clears the UI without requesting another queue advance.
     PlaybackStopped,
@@ -541,10 +541,7 @@ fn translate_player_event(event: PlayerEvent) -> AppEvent {
         PlayerEvent::TrackEnded => AppEvent::TrackEnded,
         PlayerEvent::TrackError(detail) => AppEvent::TrackError(detail),
         PlayerEvent::Started => AppEvent::PlayerStarted,
-        // `Loaded` (mpv file-loaded) has no distinct UI consumer yet; collapse
-        // it onto PlayerStarted so the bar can react to "a track is now active".
-        // TODO(M5b+): split if a view ever needs start-of-load vs loaded.
-        PlayerEvent::Loaded => AppEvent::PlayerStarted,
+        PlayerEvent::Loaded => AppEvent::PlayerLoaded,
     }
 }
 
@@ -2003,10 +2000,10 @@ mod tests {
     }
 
     #[test]
-    fn loaded_collapses_to_player_started() {
+    fn loaded_maps_to_player_loaded() {
         assert_eq!(
             translate_player_event(PlayerEvent::Loaded),
-            AppEvent::PlayerStarted
+            AppEvent::PlayerLoaded
         );
     }
 

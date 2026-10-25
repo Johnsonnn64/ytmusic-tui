@@ -9,6 +9,7 @@ pub mod keymap;
 pub mod layout;
 pub mod mpris;
 pub mod navigation;
+pub mod notifications;
 pub mod player;
 pub mod queue;
 pub mod views;

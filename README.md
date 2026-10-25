@@ -45,6 +45,8 @@ designed for tiling WM setups.
 - **Likes** — like/unlike tracks without leaving the terminal (`f`)
 - **Recently played** — your listening history as a page (`H`)
 - **Lyrics page** (`L` key)
+- **Desktop notifications** — each newly loaded song shows its title, artist,
+  and album cover via `notify-send`. Works independently of terminal artwork.
 - **MPRIS2 integration** — playerctl / waybar / KDE Connect control and metadata
 - **Navigation history** — Esc goes back through visited pages
 - **Action popup** (`.` key) — context actions for the selected track/playlist/album
@@ -81,6 +83,12 @@ the bottom of every view.
   resolve YouTube stream URLs. Keep it up to date: YouTube rotates its
   JavaScript challenge periodically, and an outdated yt-dlp silently fails to
   play anything (keep at least version 2026.6.9 or newer).
+
+Desktop song notifications require `notify-send` (Arch: `libnotify`;
+Debian/Ubuntu: `libnotify-bin`) and a running desktop notification daemon.
+They are enabled by default. To disable them, set `notifications = false` in
+`[ui]` in `~/.config/ytmusic-tui/config.toml`. If a cover is unavailable, the
+notification shows the title and artist alone.
 
 ## Installation
 

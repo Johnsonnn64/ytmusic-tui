@@ -51,6 +51,7 @@ use ytmusic_tui::config::{self, AppConfig};
 use ytmusic_tui::demo::{self, DemoScreen};
 use ytmusic_tui::keymap::{Action, Keymap, Resolution};
 use ytmusic_tui::navigation::{NavigationManager, PageState as NavPage};
+use ytmusic_tui::notifications::Notifications;
 use ytmusic_tui::player::Player;
 use ytmusic_tui::views::Theme;
 use ytmusic_tui::views::album::{AlbumAction, AlbumView};
@@ -395,6 +396,7 @@ fn run_loop(
 
     let mut artwork = ArtworkManager::new(config.ui.queue_artwork || config.ui.player_artwork);
     let mut artwork_revision = 0_u64;
+    let mut notifications = Notifications::new(config.ui.notifications);
 
     while !model.should_quit {
         if let Some(message) = artwork.poll() {
@@ -406,7 +408,7 @@ fn run_loop(
         model.player_artwork_enabled = config.ui.player_artwork && artwork.is_available();
         // Drain events that arrived since the last tick before drawing, so the
         // frame reflects the latest player position / loaded data.
-        drain_events(events, &mut model, runtime);
+        drain_events(events, &mut model, runtime, &mut notifications);
 
         // Keep the active view's filter in sync with the bar before drawing
         // (a re-fetch may have replaced the view's data this tick).
@@ -452,8 +454,10 @@ fn drain_events(
     events: &std::sync::mpsc::Receiver<AppEvent>,
     model: &mut AppModel,
     runtime: &RuntimeHandle,
+    notifications: &mut Notifications,
 ) {
     while let Ok(event) = events.try_recv() {
+        notifications.on_event(&event);
         if let Some(command) = model.on_event(event) {
             runtime.send(command);
         }
@@ -886,7 +890,7 @@ impl AppModel {
                 // A like/add-to-queue/add-to-playlist confirmation toast.
                 self.push_toast(message, Severity::Info);
             }
-            AppEvent::PlayerStarted => self.player.on_started(),
+            AppEvent::PlayerStarted | AppEvent::PlayerLoaded => self.player.on_started(),
             AppEvent::PlaybackStopped => {
                 self.current_video_id = None;
                 self.player.on_track_ended();
